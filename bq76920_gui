@@ -1,0 +1,356 @@
+#Sean Donahue
+#GUI for UART communication with PIC24, which then communicates
+#using I2C with BQ76920EVM
+
+
+import tkinter as tk
+from tkinter import scrolledtext
+import serial
+import threading
+import time
+import serial.tools.list_ports
+
+REGISTER_MAP = [
+    ("0x00", "SYS_STAT"),
+    ("0x01", "CELLBAL1"),
+    ("0x04", "SYS_CTRL1"),
+    ("0x05", "SYS_CTRL2"),
+    ("0x06", "Protection 1"),
+    ("0x07", "Protection 2"),
+    ("0x08", "Protection 3"),
+    ("0x09", "OV_TRIP"),
+    ("0x0A", "UV_TRIP"),
+    ("0x0B", "CC_CFG"),
+    ("0x0C", "VC1_HIGH_BYTE"),
+    ("0x0D", "VC1_LOW_BYTE"),
+    ("0x0E", "VC2_HIGH_BYTE"),
+    ("0x0F", "VC2_LOW_BYTE"),
+    ("0x10", "VC3_HIGH_BYTE"),
+    ("0x11", "VC3_LOW_BYTE"),
+    ("0x12", "VC4_HIGH_BYTE"),
+    ("0x13", "VC4_LOW_BYTE"),
+    ("0x14", "VC5_HIGH_BYTE"),
+    ("0x15", "VC5_LOW_BYTE")
+]
+
+BIT_FIELD_MAP = {
+    "0x00": [
+        "System Status Register — Indicates system-level protection faults and data readiness.",
+        "Bit 7: CC_READY - Coulomb Counter data is valid and ready to read.",
+        "Bit 6: RSVD - Reserved (should be ignored).",
+        "Bit 5: DEVICE_X - Device initialization complete.",
+        "Bit 4: OVRDAL - Alert signal overridden by host or firmware.",
+        "Bit 3: UV - Undervoltage fault has occurred.",
+        "Bit 2: OV - Overvoltage fault has occurred.",
+        "Bit 1: SCD - Short Circuit in Discharge path detected.",
+        "Bit 0: OCD - Overcurrent in Discharge path detected."
+    ],
+    "0x01": [
+        "Cell Balancing Register 1 — Controls cell balancing for cells 1-5.",
+        "Bit 4: CB5 - Enable balancing on Cell 5.",
+        "Bit 3: CB4 - Enable balancing on Cell 4.",
+        "Bit 2: CB3 - Enable balancing on Cell 3.",
+        "Bit 1: CB2 - Enable balancing on Cell 2.",
+        "Bit 0: CB1 - Enable balancing on Cell 1."
+    ],
+    "0x04": [
+        "System Control Register 1 — Enables analog measurements, temperature source, and shutdown features.",
+        "Bit 7: LOAD_PRESENT - Indicates external load is detected.",
+        "Bit 6: RSVD - Reserved.",
+        "Bit 5: RSVD - Reserved.",
+        "Bit 4: ADC_EN - Enable ADC measurements (voltage, temperature).",
+        "Bit 3: TEMP_SEL - Select internal (0) or external (1) temperature sensor.",
+        "Bit 2: RSVD - Reserved.",
+        "Bit 1: SHUT_A - Shutdown command A (high active).",
+        "Bit 0: SHUT_B - Shutdown command B (high active)."
+    ],
+    "0x05": [
+        "System Control Register 2 — Controls charge/discharge FETs and Coulomb Counter settings.",
+        "Bit 7: DLY_DIS - Disable protection delays (useful for debugging).",
+        "Bit 6: CC_EN - Enable Coulomb Counter.",
+        "Bit 5: CC_ONE - Use 1-hour integration interval for CC.",
+        "Bit 4: RSVD - Reserved.",
+        "Bit 3: RSVD - Reserved.",
+        "Bit 2: RSVD - Reserved.",
+        "Bit 1: DSG_ON - Discharge FET enabled.",
+        "Bit 0: CHG_ON - Charge FET enabled."
+    ],
+    "0x06": [
+        "Protection Register 1 — Configures short-circuit detection thresholds and timing.",
+        "Bit 7: RSNS - Select sense resistor config (0: 10mOhms, 1: 1mOhm).",
+        "Bit 6: RSVD - Reserved.",
+        "Bit 5: RSVD - Reserved.",
+        "Bit 4: SCD_D1 - Short circuit threshold bit 1.",
+        "Bit 3: SCD_D0 - Short circuit threshold bit 0.",
+        "Bit 2: SCD_T2 - Short circuit delay bit 2.",
+        "Bit 1: SCD_T1 - Short circuit delay bit 1.",
+        "Bit 0: SCD_T0 - Short circuit delay bit 0."
+    ],
+    "0x07": [
+        "Protection Register 2 — Configures overcurrent in discharge thresholds and delay.",
+        "Bit 6: OCD_D2 - Overcurrent threshold bit 2.",
+        "Bit 5: OCD_D1 - Overcurrent threshold bit 1.",
+        "Bit 4: OCD_D0 - Overcurrent threshold bit 0.",
+        "Bit 3: OCD_T3 - Overcurrent delay bit 3.",
+        "Bit 2: OCD_T2 - Overcurrent delay bit 2.",
+        "Bit 1: OCD_T1 - Overcurrent delay bit 1.",
+        "Bit 0: OCD_T0 - Overcurrent delay bit 0."
+    ],
+    "0x08": [
+        "Protection Register 3 — Configures undervoltage and overvoltage detection delays.",
+        "Bit 7: UV_D1 - Undervoltage delay bit 1.",
+        "Bit 6: UV_D0 - Undervoltage delay bit 0.",
+        "Bit 5: OV_D1 - Overvoltage delay bit 1.",
+        "Bit 4: OV_D0 - Overvoltage delay bit 0.",
+        "Bit 3: RSVD - Reserved.",
+        "Bit 2: RSVD - Reserved.",
+        "Bit 1: RSVD - Reserved.",
+        "Bit 0: RSVD - Reserved."
+    ],
+    "0x09": [
+        "Overvoltage Threshold Register — Sets the OV threshold value.",
+        "Bit 7-0: OV_T[7:0] - 8-bit value determining overvoltage threshold (increments of 20 mV)."
+    ],
+    "0x0A": [
+        "Undervoltage Threshold Register — Sets the UV threshold value.",
+        "Bit 7-0: UV_T[7:0] - 8-bit value determining undervoltage threshold (increments of 20 mV)."
+    ],
+    "0x0B": [
+        "Coulomb Counter Configuration — Sets sample rate and filtering for CC measurements.",
+        "Bit 5: CC_CFG5 - Filter configuration bit.",
+        "Bit 4: CC_CFG4 - Filter configuration bit.",
+        "Bit 3: CC_CFG3 - Filter configuration bit.",
+        "Bit 2: CC_CFG2 - Filter configuration bit.",
+        "Bit 1: CC_CFG1 - Filter configuration bit.",
+        "Bit 0: CC_CFG0 - Filter configuration bit."
+    ],
+    "0x0C": [
+    "VC1_HIGH_BYTE (0x0C) — Most significant byte of Cell 1 voltage.",
+    "Each cell voltage is reported using 12-bit left-justified format across two registers (HI and LO).",
+    "To calculate voltage: ((VCx_HI << 8) | VCx_LO) >> 4 gives raw value, which is scaled by ADC_GAIN and offset."
+    ],
+    "0x0D": [
+        "VC1_LOW_BYTE (0x0D) — Least significant byte of Cell 1 voltage."
+    ],
+    "0x0E": [
+        "VC2_HIGH_BYTE (0x0E) — Most significant byte of Cell 2 voltage."
+    ],
+    "0x0F": [
+        "VC2_LOW_BYTE (0x0F) — Least significant byte of Cell 2 voltage."
+    ],
+    "0x10": [
+        "VC3_HIGH_BYTE (0x10) — Most significant byte of Cell 3 voltage."
+    ],
+    "0x11": [
+        "VC3_LOW_BYTE (0x11) — Least significant byte of Cell 3 voltage."
+    ],
+    "0x12": [
+        "VC4_HIGH_BYTE (0x12) — Most significant byte of Cell 4 voltage."
+    ],
+    "0x13": [
+        "VC4_LOW_BYTE (0x13) — Least significant byte of Cell 4 voltage."
+    ],
+    "0x14": [
+        "VC5_HIGH_BYTE (0x14) — Most significant byte of Cell 5 voltage."
+    ],
+    "0x15": [
+        "VC5_LOW_BYTE (0x15) — Least significant byte of Cell 5 voltage."
+    ]
+}
+
+
+class BQ76920GUI:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("BQ76920 UART GUI")
+        self.ser = None  #Serial port connection
+        self.baud_rate = 9600  #Baud rate for UART
+
+        self.setup_gui()            #Build GUI layout and widgets
+        self.connect_serial()       #Attempt to auto-connect to the serial port
+        time.sleep(1.0)             #Allow device to stabilize before communication
+        self.start_reader_thread()  #Start a thread to read incoming UART messages
+
+    def setup_gui(self):
+        #Main container
+        main_frame = tk.Frame(self.master)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        #Register Map ListBox
+        reg_frame = tk.LabelFrame(main_frame, text="Register Map")
+        reg_frame.grid(row=0, column=0, sticky='ns', padx=(0, 10))
+        self.reg_listbox = tk.Listbox(reg_frame, width=30, height=20)
+        self.reg_listbox.pack()
+        for addr, name in REGISTER_MAP:
+            self.reg_listbox.insert(tk.END, f"{addr} : {name}")
+        self.reg_listbox.bind("<<ListboxSelect>>", self.show_bit_fields)  #Show bit field info on selection
+        self.reg_listbox.bind("<Double-Button-1>", self.on_register_double_click)  #Auto-fill read command
+
+        #UART Terminal
+        uart_frame = tk.LabelFrame(main_frame, text="UART Terminal")
+        uart_frame.grid(row=0, column=1, sticky='n')
+
+        entry_frame = tk.Frame(uart_frame)
+        entry_frame.pack(pady=(0, 5))
+
+        self.entry = tk.Entry(entry_frame, width=60)  #Command input
+        self.entry.grid(row=0, column=0, padx=(0, 5))
+
+        send_button = tk.Button(entry_frame, text="Send", command=self.send_command)
+        send_button.grid(row=0, column=1)
+
+        clear_button = tk.Button(entry_frame, text="Clear", command=self.clear_output)
+        clear_button.grid(row=0, column=2, padx=(5, 0))
+
+        self.output_text = scrolledtext.ScrolledText(uart_frame, width=50, height=15, state='disabled')
+        self.output_text.pack()  #Output display for UART messages
+
+        #Bit Field Info Panel
+        bit_frame = tk.LabelFrame(main_frame, text="Bit Field Info")
+        bit_frame.grid(row=0, column=2, sticky='ns')
+        self.bit_text = tk.Text(bit_frame, width=90, height=20, state='disabled')
+        self.bit_text.pack()
+
+        #Instruction Panel
+        instructions_frame = tk.LabelFrame(main_frame, text="HOW TO USE")
+        instructions_frame.grid(row=1, column=0, columnspan=3, sticky='ew', pady=(10, 0))
+
+        instructions_text = tk.Text(instructions_frame, width=90, height=12, wrap="word")
+        instructions_text.pack(anchor='w')
+        instructions_text.tag_configure("left", justify="left")
+
+        instructions_text.insert(tk.END,
+            "1. Ensure the BQ76920EVM device is powered and connected to a COM port.\n"
+            "2. Commands:\n"
+            "   g                  -> Get status\n"
+            "   read 0x04 1        -> Read 1 byte from SYS_CTRL1\n"
+            "   write 0x05 0xC0    -> Write 0xC0 to SYS_CTRL2\n"
+            "   write 0x00 0x01    -> Clears faults in SYS_STAT (otherwise read-only)\n"
+            "   write 0x04 0x19    -> ADC enable, external temp, and disable CHG + DSG drivers\n"
+            "3. Click any register on the left to view bit field details.\n"
+            "4. Double-click a register to auto-fill a 'read' command.\n"
+            "5. Use 'Clear' to reset the UART output window.\n"
+            "6. Coulomb Counter data will be displayed in the lower right panel.\n"
+            "7. Sense resistor value is by default 10 mOhm. Change in register 0x06.\n",
+            "left"
+        )
+        instructions_text.configure(state='disabled')
+
+        #Coulomb Counter Log Panel
+        cc_frame = tk.LabelFrame(main_frame, text="Coulomb Counter / SoC")
+        cc_frame.grid(row=1, column=2, sticky='nsew', padx=(10, 0), pady=(10, 0))
+
+        self.cc_text = tk.Text(cc_frame, width=60, height=12, state='disabled', bg="#f8f8f8")
+        self.cc_text.pack()
+
+    def update_coulomb_display(self, text):
+        #Append new Coulomb Counter data to the CC display log
+        self.cc_text.configure(state='normal')
+        self.cc_text.insert(tk.END, text + "\n")
+        self.cc_text.see(tk.END)
+        self.cc_text.configure(state='disabled')
+
+    def show_bit_fields(self, event):
+        #Show detailed bit field documentation for the selected register
+        selection = self.reg_listbox.curselection()
+        if selection:
+            line = self.reg_listbox.get(selection[0])
+            addr = line.split(":")[0].strip()
+            bit_lines = BIT_FIELD_MAP.get(addr, ["No bit field info available for this register."])
+            self.bit_text.configure(state='normal')
+            self.bit_text.delete(1.0, tk.END)
+            for line in bit_lines:
+                self.bit_text.insert(tk.END, line + "\n")
+            self.bit_text.configure(state='disabled')
+
+    def on_register_double_click(self, event):
+        #Auto-fill read command when register is double-clicked
+        selection = self.reg_listbox.curselection()
+        if selection:
+            line = self.reg_listbox.get(selection[0])
+            addr = line.split(":")[0].strip()
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, f"read {addr} 1")
+
+    def clear_output(self):
+        #Clears the UART output display
+        self.output_text.configure(state='normal')
+        self.output_text.delete(1.0, tk.END)
+        self.output_text.configure(state='disabled')
+
+    def log_message(self, msg):
+        #Display messages in the output window, with colored highlights for ACK/FAIL
+        self.output_text.configure(state='normal')
+        if "ACK" in msg:
+            self.output_text.insert(tk.END, msg + "\n", "success")
+        elif "FAIL" in msg:
+            self.output_text.insert(tk.END, msg + "\n", "error")
+        else:
+            self.output_text.insert(tk.END, msg + "\n")
+        self.output_text.see(tk.END)
+        self.output_text.configure(state='disabled')
+        self.output_text.tag_config("success", foreground="green")
+        self.output_text.tag_config("error", foreground="red")
+
+            
+    def connect_serial(self):
+        ports = list(serial.tools.list_ports.comports())
+        for port in ports:
+            try:
+                ser = serial.Serial(port.device, self.baud_rate, timeout=1)  # <- timeout is key
+                time.sleep(2.0)
+                ser.reset_input_buffer()
+                #ser.write(b"g\n")
+                start = time.time()
+                while time.time() - start < 2.0:
+                    if ser.in_waiting:
+                        response = ser.readline().decode(errors='ignore').strip()
+                        break
+                else:
+                    response = None
+                if response:
+                    self.ser = ser
+                    self.log_message(f"Connected to {port.device}")
+                    return
+                else:
+                    ser.close()
+            except Exception as e:
+                print(f"Error opening {port.device}: {e}")
+                continue
+        self.log_message("Could not auto-detect COM port.")
+
+
+    def send_command(self):
+        #Send a command from the entry box to the serial device
+        cmd = self.entry.get().strip()
+        if self.ser and self.ser.is_open:
+            self.ser.reset_input_buffer()
+            self.ser.write((cmd + "\n").encode())
+            self.log_message(f"> {cmd}")
+            self.entry.delete(0, tk.END)
+
+    def start_reader_thread(self):
+        #Launch background thread to read incoming UART messages
+        thread = threading.Thread(target=self.read_serial, daemon=True)
+        thread.start()
+
+    def read_serial(self):
+        #Read data from serial and display either to log or Coulomb panel
+        while True:
+            if self.ser and self.ser.in_waiting:
+                try:
+                    line = self.ser.readline().decode(errors='ignore').strip()
+                    if line:
+                        if line.startswith("Current:"):
+                            self.update_coulomb_display(line)
+                        else:
+                            self.log_message(line)
+                except Exception as e:
+                    self.log_message(f"Read error: {e}")
+            time.sleep(0.1)
+
+#Main launch point
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = BQ76920GUI(root)
+    root.mainloop()
